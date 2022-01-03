@@ -22,6 +22,7 @@
 use std::fmt;
 
 use crate::ebur128::Channel;
+use crate::utils::Sample;
 
 /// BS.1770 filter and optional sample/true peak measurement context.
 pub struct Filter {
@@ -139,24 +140,14 @@ impl Filter {
     }
 
     pub fn reset_peaks(&mut self) {
-        for v in &mut *self.sample_peak {
-            *v = 0.0;
-        }
-
-        for v in &mut *self.true_peak {
-            *v = 0.0;
-        }
+        self.sample_peak.fill(0.0);
+        self.true_peak.fill(0.0);
     }
 
     pub fn reset(&mut self) {
         self.reset_peaks();
 
-        for f in &mut *self.filter_state {
-            // TODO: Use slice::fill() once stabilized
-            for v in &mut *f {
-                *v = 0.0;
-            }
-        }
+        self.filter_state.iter_mut().for_each(|f| f.fill(0.0));
 
         if let Some(ref mut tp) = self.tp {
             tp.reset();
@@ -171,9 +162,9 @@ impl Filter {
         &*self.true_peak
     }
 
-    pub fn process<'a, T: crate::AsF64 + 'a, S: crate::Samples<'a, T>>(
+    pub fn process<'a, T: Sample + 'a, S: crate::Samples<'a, T>>(
         &mut self,
-        src: &S,
+        src: S,
         dest: &mut [f64],
         dest_index: usize,
         channel_map: &[crate::ebur128::Channel],
@@ -193,31 +184,24 @@ impl Filter {
                     assert!(c < src.channels());
 
                     src.foreach_sample(c, |sample| {
-                        let v = sample.as_f64().abs();
+                        let v = sample.as_f64_raw().abs();
                         if v > max {
                             max = v;
                         }
                     });
 
-                    max /= T::MAX;
+                    max /= T::MAX_AMPLITUDE;
                     if max > *sample_peak {
                         *sample_peak = max;
                     }
                 }
             }
 
-            if let Some(ref mut tp) = self.tp {
-                assert!(self.true_peak.len() == self.channels as usize);
-                tp.check_true_peak(src, &mut *self.true_peak);
-            }
-
             let dest_stride = dest.len() / self.channels as usize;
             assert!(dest_index + src.frames() <= dest_stride);
 
-            for (c, (channel_map, dest)) in channel_map
-                .iter()
-                .zip(dest.chunks_exact_mut(dest_stride))
-                .enumerate()
+            for (c, (channel_map, dest)) in
+                Iterator::zip(channel_map.iter(), dest.chunks_exact_mut(dest_stride)).enumerate()
             {
                 if *channel_map == crate::ebur128::Channel::Unused {
                     continue;
@@ -234,7 +218,7 @@ impl Filter {
                 let filter_state = &mut filter_state[c];
 
                 src.foreach_sample_zipped(c, dest[dest_index..].iter_mut(), |src, dest| {
-                    filter_state[0] = src.as_f64_scaled()
+                    filter_state[0] = (*src).to_sample::<f64>()
                         - a[1] * filter_state[1]
                         - a[2] * filter_state[2]
                         - a[3] * filter_state[3]
@@ -245,10 +229,7 @@ impl Filter {
                         + b[3] * filter_state[3]
                         + b[4] * filter_state[4];
 
-                    filter_state[4] = filter_state[3];
-                    filter_state[3] = filter_state[2];
-                    filter_state[2] = filter_state[1];
-                    filter_state[1] = filter_state[0];
+                    filter_state.copy_within(0..4, 1);
                 });
 
                 if ftz.is_none() {
@@ -258,6 +239,61 @@ impl Filter {
                         }
                     }
                 }
+            }
+
+            if let Some(ref mut tp) = self.tp {
+                assert!(self.true_peak.len() == self.channels as usize);
+                tp.check_true_peak(src, &mut *self.true_peak);
+            }
+        });
+    }
+
+    pub fn seed<'a, T: Sample + 'a, S: crate::Samples<'a, T>>(
+        &mut self,
+        src: S,
+        channel_map: &[crate::ebur128::Channel],
+    ) {
+        assert!(channel_map.len() == self.channels as usize);
+        assert!(src.channels() == self.channels as usize);
+        assert!(self.filter_state.len() == self.channels as usize);
+
+        ftz::with_ftz(|ftz| {
+            for (c, channel_map) in channel_map.iter().enumerate() {
+                if *channel_map == crate::ebur128::Channel::Unused {
+                    continue;
+                }
+
+                assert!(c < src.channels());
+
+                let Filter {
+                    ref mut filter_state,
+                    ref a,
+                    ..
+                } = *self;
+                let filter_state = &mut filter_state[c];
+
+                src.foreach_sample(c, |src| {
+                    filter_state[0] = (*src).to_sample::<f64>()
+                        - a[1] * filter_state[1]
+                        - a[2] * filter_state[2]
+                        - a[3] * filter_state[3]
+                        - a[4] * filter_state[4];
+
+                    filter_state.copy_within(0..4, 1);
+                });
+
+                if ftz.is_none() {
+                    for v in filter_state {
+                        if v.abs() < std::f64::EPSILON {
+                            *v = 0.0;
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref mut tp) = self.tp {
+                assert!(self.true_peak.len() == self.channels as usize);
+                tp.seed(src);
             }
         });
     }
@@ -275,10 +311,11 @@ impl Filter {
         let audio_data_stride = audio_data.len() / channels;
         assert!(audio_data_index <= audio_data_stride);
 
-        for (c, (channel, audio_data)) in channel_map
-            .iter()
-            .zip(audio_data.chunks_exact(audio_data_stride))
-            .enumerate()
+        for (c, (channel, audio_data)) in Iterator::zip(
+            channel_map.iter(),
+            audio_data.chunks_exact(audio_data_stride),
+        )
+        .enumerate()
         {
             if *channel == Channel::Unused {
                 continue;
@@ -470,7 +507,8 @@ mod tests {
                 assert_float_eq!(
                     *r,
                     *c,
-                    ulps <= 2,
+                    // For a performance-boost, filter is defined as f32, causing slightly lower precision
+                    abs <= 0.000004,
                     "Rust and C implementation differ at true peak {}",
                     i
                 );
@@ -516,7 +554,7 @@ mod tests {
             let mut data_out_tmp = vec![0.0f64; frames * signal.channels as usize];
 
             f.process(
-                &crate::Interleaved::new(
+                crate::Interleaved::new(
                     &signal.data[..(frames * signal.channels as usize)],
                     signal.channels as usize,
                 )
@@ -604,7 +642,7 @@ mod tests {
             let mut data_out_tmp = vec![0.0f64; frames * signal.channels as usize];
 
             f.process(
-                &crate::Interleaved::new(
+                crate::Interleaved::new(
                     &signal.data[..(frames * signal.channels as usize)],
                     signal.channels as usize,
                 )
@@ -692,7 +730,7 @@ mod tests {
             let mut data_out_tmp = vec![0.0f64; frames * signal.channels as usize];
 
             f.process(
-                &crate::Interleaved::new(
+                crate::Interleaved::new(
                     &signal.data[..(frames * signal.channels as usize)],
                     signal.channels as usize,
                 )
@@ -780,7 +818,7 @@ mod tests {
             let mut data_out_tmp = vec![0.0f64; frames * signal.channels as usize];
 
             f.process(
-                &crate::Interleaved::new(
+                crate::Interleaved::new(
                     &signal.data[..(frames * signal.channels as usize)],
                     signal.channels as usize,
                 )

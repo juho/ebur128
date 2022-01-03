@@ -19,7 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-use crate::energy_to_loudness;
+use crate::{energy_to_loudness, Error};
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -64,17 +64,14 @@ impl Histogram {
     }
 
     fn reset(&mut self) {
-        // TODO: Use slice::fill() once stabilized
-        for v in self.0.iter_mut() {
-            *v = 0;
-        }
+        self.0.fill(0);
     }
 
     fn calc_relative_threshold(&self) -> (u64, f64) {
         let mut above_thresh_counter = 0;
         let mut relative_threshold = 0.0;
 
-        for (count, energy) in self.0.iter().zip(HISTOGRAM_ENERGIES.iter()) {
+        for (count, energy) in Iterator::zip(self.0.iter(), HISTOGRAM_ENERGIES.iter()) {
             relative_threshold += *count as f64 * *energy;
             above_thresh_counter += *count;
         }
@@ -83,11 +80,16 @@ impl Histogram {
     }
 
     fn loudness_range(h: &[u64; 1000]) -> f64 {
+        let mut h_sum = [0; 1000];
         let mut size = 0;
         let mut power = 0.0;
 
-        for (count, energy) in h.iter().zip(HISTOGRAM_ENERGIES.iter()) {
+        for ((count, count_sum), energy) in Iterator::zip(
+            Iterator::zip(h.iter(), h_sum.iter_mut()),
+            HISTOGRAM_ENERGIES.iter(),
+        ) {
             size += *count;
+            *count_sum = size;
             power += *count as f64 * *energy;
         }
 
@@ -109,36 +111,48 @@ impl Histogram {
                 index
             }
         };
-        let size = h[index..].iter().sum::<u64>();
+        let before = if let Some(prev_index) = index.checked_sub(1) {
+            h_sum.get(prev_index).cloned().unwrap_or(0)
+        } else {
+            0
+        };
+        let size = size - before;
         if size == 0 {
             return 0.0;
         }
 
-        let percentile_low = ((size - 1) as f64 * 0.1 + 0.5) as u64;
-        let percentile_high = ((size - 1) as f64 * 0.95 + 0.5) as u64;
+        let percentile_low = ((size - 1) as f64 * 0.1 + 0.5) as u64 + before;
+        let percentile_high = ((size - 1) as f64 * 0.95 + 0.5) as u64 + before;
 
-        // TODO: Use an iterator here, maybe something around Iterator::scan()
-        let mut j = index;
-        let mut size = 0;
-        while size <= percentile_low {
-            size += h[j];
-            j += 1;
-        }
-        let l_en = HISTOGRAM_ENERGIES[j - 1];
+        let j = h_sum[index..]
+            .binary_search(&(percentile_low + 1))
+            .unwrap_or_else(std::convert::identity);
+        let j = match h_sum[..index + j]
+            .iter()
+            .rposition(|&v| v <= percentile_low)
+        {
+            Some(j) => j + 1,
+            None => 0,
+        };
+        let l_en = HISTOGRAM_ENERGIES[j];
 
-        while size <= percentile_high {
-            size += h[j];
-            j += 1;
-        }
-        let h_en = HISTOGRAM_ENERGIES[j - 1];
+        let j = h_sum[index..]
+            .binary_search(&(percentile_high + 1))
+            .unwrap_or_else(std::convert::identity);
+        let j = match h_sum[..index + j]
+            .iter()
+            .rposition(|&v| v <= percentile_high)
+        {
+            Some(j) => j + 1,
+            None => 0,
+        };
+        let h_en = HISTOGRAM_ENERGIES[j];
 
         energy_to_loudness(h_en) - energy_to_loudness(l_en)
     }
 }
 
 /// History of measured energies with a configurable maximum size.
-// TODO: Would ideally use a linked-list based queue of fixed-size queues
-// to not require a huge contiguous allocation
 pub struct Queue {
     queue: VecDeque<f64>,
     max: usize,
@@ -186,17 +200,13 @@ impl Queue {
         let minus_twenty_decibels = f64::powf(10.0, -20.0 / 10.0);
         let integrated = minus_twenty_decibels * power;
 
-        // TODO: Use iterators here or otherwise get rid of bounds checks
-        let mut relgated = 0;
-        let mut relgated_size = q.len();
-        while relgated_size > 0 && q[relgated] < integrated {
-            relgated += 1;
-            relgated_size -= 1;
-        }
+        let relgated = q.iter().take_while(|&v| *v < integrated).count();
+        let relgated_size = q.len() - relgated;
 
-        if relgated_size > 0 {
-            let h_en = q[relgated + ((relgated_size - 1) as f64 * 0.95 + 0.5) as usize];
-            let l_en = q[relgated + ((relgated_size - 1) as f64 * 0.1 + 0.5) as usize];
+        if let Some(relgated_size) = relgated_size.checked_sub(1) {
+            let relgated_size = relgated_size as f64;
+            let h_en = q[relgated + (relgated_size * 0.95 + 0.5) as usize];
+            let l_en = q[relgated + (relgated_size * 0.1 + 0.5) as usize];
 
             energy_to_loudness(h_en) - energy_to_loudness(l_en)
         } else {
@@ -300,10 +310,10 @@ impl History {
         for h in s {
             match h {
                 History::Histogram(ref h) => {
-                    for (count, energy) in h.0[start_index..]
-                        .iter()
-                        .zip(HISTOGRAM_ENERGIES[start_index..].iter())
-                    {
+                    for (count, energy) in Iterator::zip(
+                        h.0[start_index..].iter(),
+                        HISTOGRAM_ENERGIES[start_index..].iter(),
+                    ) {
                         gated_loudness += *count as f64 * *energy;
                         above_thresh_counter += *count;
                     }
@@ -347,7 +357,7 @@ impl History {
         Self::loudness_range_multiple(&[self]).unwrap()
     }
 
-    pub fn loudness_range_multiple(s: &[&Self]) -> Result<f64, ()> {
+    pub fn loudness_range_multiple(s: &[&Self]) -> Result<f64, Error> {
         if s.is_empty() {
             return Ok(0.0);
         }
@@ -364,11 +374,11 @@ impl History {
                     for h in s {
                         match h {
                             History::Histogram(ref h) => {
-                                for (i, o) in h.0.iter().zip(combined.iter_mut()) {
+                                for (i, o) in Iterator::zip(h.0.iter(), combined.iter_mut()) {
                                     *o += *i;
                                 }
                             }
-                            _ => return Err(()),
+                            _ => return Err(Error::InvalidMode),
                         }
                     }
 
@@ -384,7 +394,7 @@ impl History {
                         History::Queue(ref q) => {
                             len += q.queue.len();
                         }
-                        _ => return Err(()),
+                        _ => return Err(Error::InvalidMode),
                     }
                 }
 
@@ -396,7 +406,7 @@ impl History {
                             combined.extend_from_slice(v1);
                             combined.extend_from_slice(v2);
                         }
-                        _ => return Err(()),
+                        _ => return Err(Error::InvalidMode),
                     }
                 }
 

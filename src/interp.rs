@@ -19,155 +19,147 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-use smallvec::SmallVec;
-use std::f64;
+use crate::utils::FrameAccumulator;
+use std::f64::consts::PI;
 
-/// Data structure for polyphase FIR interpolator
-#[derive(Debug)]
-pub struct Interp {
-    /// Interpolation factor of the interpolator
-    factor: usize,
-    /// Taps (prefer odd to increase zero coeffs)
-    taps: usize,
-    /// Number of channels
-    channels: u32,
-    /// Size of delay buffer
-    delay: usize,
-    /// List of subfilters (one for each factor)
-    filter: SmallVec<[Filter; 4]>,
-    /// List of delay buffers (one for each channel)
-    z: Box<[f32]>,
-    /// Current delay buffer index
-    zi: usize,
+const ALMOST_ZERO: f64 = 0.000001;
+const TAPS: usize = 48;
+
+// Workaround for missing const-generics
+trait ArrayBuf<Item>: std::borrow::BorrowMut<[Item]> {
+    const SIZE: usize;
 }
 
-#[derive(Debug)]
-struct Filter {
-    /// List of subfilter coefficients and corresponding delay indices
-    coeff: Box<[(f64, usize)]>,
+impl<Item> ArrayBuf<Item> for [Item; 24] {
+    const SIZE: usize = 24;
 }
 
-impl Interp {
-    #[allow(clippy::many_single_char_names)]
-    pub fn new(taps: usize, factor: usize, channels: u32) -> Self {
-        let delay = (taps + factor - 1) / factor;
+impl<Item> ArrayBuf<Item> for [Item; 12] {
+    const SIZE: usize = 12;
+}
 
-        // Initialize the filter memory
-        // One subfilter per interpolation factor.
-        let mut filter = SmallVec::<[_; 4]>::new();
+/// A circular buffer offering fixed-length continous views into data
+/// This is enabled by writing data twice, also to a "shadow"-buffer following the primary buffer,
+/// The tradeoff is writing all data twice, the gain is giving the compiler continuous view with
+/// predictable length into the data, unlocking some more optimizations
+#[derive(Clone, Debug)]
+struct RollingBuffer<A, T> {
+    buf: [T; TAPS],
+    position: usize,
+    _phantom: std::marker::PhantomData<A>,
+}
 
-        for _ in 0..factor {
-            filter.push(vec![]);
+impl<A: ArrayBuf<T>, T: Default + Copy> RollingBuffer<A, T> {
+    fn new() -> Self {
+        assert!(A::SIZE * 2 <= TAPS);
+
+        let buf: [T; TAPS] = [Default::default(); TAPS];
+
+        Self {
+            buf,
+            position: A::SIZE,
+            _phantom: Default::default(),
+        }
+    }
+
+    #[inline(always)]
+    fn push_front(&mut self, v: T) {
+        if self.position == 0 {
+            self.position = A::SIZE - 1;
+        } else {
+            self.position -= 1;
+        }
+        unsafe {
+            *self.buf.get_unchecked_mut(self.position) = v;
+            *self.buf.get_unchecked_mut(self.position + A::SIZE) = v;
+        }
+    }
+}
+
+impl<A, T> AsRef<A> for RollingBuffer<A, T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &A {
+        unsafe { &*(self.buf.get_unchecked(self.position) as *const T as *const A) }
+    }
+}
+
+macro_rules! interp_impl {
+    ( $name:ident, $factor:expr ) => {
+        #[derive(Debug, Clone)]
+        pub struct $name<F: FrameAccumulator> {
+            filter: [[f32; $factor]; (TAPS / $factor)],
+            buffer: RollingBuffer<[F; TAPS / $factor], F>,
         }
 
-        // One delay buffer per channel.
-        let z = vec![0.0; delay * channels as usize];
-
-        // Calculate the filter coefficients.
-        for j in 0..taps {
-            const ALMOST_ZERO: f64 = 0.000001;
-
-            // Calculate Hanning window
-            let w = 0.5 * (1.0 - f64::cos(2.0 * f64::consts::PI * j as f64 / (taps - 1) as f64));
-
-            // Calculate sinc and apply hanning window
-            let m = j as f64 - (taps - 1) as f64 / 2.0;
-            let c = if m.abs() > ALMOST_ZERO {
-                w * f64::sin(m * f64::consts::PI / factor as f64)
-                    / (m * f64::consts::PI / factor as f64)
-            } else {
-                w
-            };
-
-            // Ignore any zero coeffs.
-            if c.abs() > ALMOST_ZERO {
-                // Put the coefficient into the correct subfilter
-                let f = j % factor;
-
-                let f = &mut filter[f];
-                f.push((c, j / factor));
+        impl<F> Default for $name<F>
+        where
+            F: FrameAccumulator + Default,
+        {
+            fn default() -> Self {
+                Self::new()
             }
         }
 
-        Interp {
-            factor,
-            taps,
-            channels,
-            delay,
-            filter: filter
-                .into_iter()
-                .map(|f| Filter {
-                    coeff: f.into_boxed_slice(),
-                })
-                .collect(),
-            z: z.into_boxed_slice(),
-            zi: 0,
-        }
-    }
+        impl<F> $name<F>
+        where
+            F: FrameAccumulator + Default,
+        {
+            pub fn new() -> Self {
+                let mut filter: [[_; $factor]; (TAPS / $factor)] = Default::default();
+                for (j, coeff) in filter
+                    .iter_mut()
+                    .map(|x| x.iter_mut())
+                    .flatten()
+                    .enumerate()
+                {
+                    let j = j as f64;
+                    // Calculate Hanning window,
+                    let window = TAPS + 1;
+                    // Ignore one tap. (Last tap is zero anyways, and we want to hit an even multiple of 48)
+                    let window = (window - 1) as f64;
+                    let w = 0.5 * (1.0 - f64::cos(2.0 * PI * j / window));
 
-    pub fn get_factor(&self) -> usize {
-        self.factor
-    }
+                    // Calculate sinc and apply hanning window
+                    let m = j - window / 2.0;
+                    *coeff = if m.abs() > ALMOST_ZERO {
+                        w * f64::sin(m * PI / $factor as f64) / (m * PI / $factor as f64)
+                    } else {
+                        w
+                    } as f32;
+                }
 
-    pub fn reset(&mut self) {
-        // TODO: Use slice::fill() once stabilized
-        for v in &mut *self.z {
-            *v = 0.0;
-        }
-        self.zi = 0;
-    }
+                Self {
+                    filter,
+                    buffer: RollingBuffer::new(),
+                }
+            }
 
-    pub fn process(&mut self, src: &[f32], dst: &mut [f32]) {
-        assert!(src.len().checked_mul(self.factor) == Some(dst.len()));
-        assert!(self.z.len() == self.delay * self.channels as usize);
-        assert!(self.filter.len() == self.factor);
-        assert!(self.zi < self.delay);
+            pub fn interpolate(&mut self, frame: F) -> [F; $factor] {
+                // Write in Frames in reverse, to enable forward-scanning with filter
+                self.buffer.push_front(frame);
 
-        if src.is_empty() {
-            return;
-        }
+                let mut output: [F; $factor] = Default::default();
 
-        let frames = src.len() / self.channels as usize;
+                let buf = self.buffer.as_ref();
 
-        for (src, (dst, z)) in src.chunks_exact(frames).zip(
-            dst.chunks_exact_mut(frames * self.factor)
-                .zip(self.z.chunks_exact_mut(self.delay)),
-        ) {
-            let mut zi = self.zi;
-
-            for (src, dst) in src.iter().zip(dst.chunks_exact_mut(self.factor)) {
-                // Add sample to delay buffer
-                //
-                // TODO Ringbuffer without bounds checks for z/zi
-                //
-                // Safety: zi is checked to be between 0 and self.delay
-                *unsafe { z.get_unchecked_mut(zi) } = *src;
-
-                // Apply coefficients
-                for (filter, dst) in self.filter.iter().zip(dst.iter_mut()) {
-                    let mut acc = 0.0;
-                    for (c, index) in &*filter.coeff {
-                        let mut i = zi as i32 - *index as i32;
-                        if i < 0 {
-                            i += self.delay as i32;
-                        }
-                        // Safety: zi is checked to be between 0 and self.delay
-                        acc += *unsafe { z.get_unchecked(i as usize) } as f64 * c;
+                for (filter_coeffs, input_frame) in Iterator::zip(self.filter.iter(), buf) {
+                    for (output_frame, coeff) in Iterator::zip(output.iter_mut(), filter_coeffs) {
+                        output_frame.scale_add(input_frame, *coeff);
                     }
-
-                    *dst = acc as f32;
                 }
 
-                zi += 1;
-                if zi == self.delay {
-                    zi = 0;
-                }
+                output
+            }
+
+            pub fn reset(&mut self) {
+                self.buffer = RollingBuffer::new();
             }
         }
-
-        self.zi = (self.zi + frames) % self.delay;
-    }
+    };
 }
+
+interp_impl!(Interp2F, 2);
+interp_impl!(Interp4F, 4);
 
 #[cfg(feature = "c-tests")]
 use std::os::raw::c_void;
@@ -186,11 +178,60 @@ extern "C" {
 
 #[cfg(feature = "c-tests")]
 #[cfg(test)]
-mod tests {
+mod c_tests {
     use super::*;
     use crate::tests::Signal;
     use float_eq::assert_float_eq;
     use quickcheck_macros::quickcheck;
+
+    fn process_rust(data_in: &[f32], data_out: &mut [f32], factor: usize, channels: usize) {
+        macro_rules! process_specialized {
+            ( $interp:ident, $channels:expr ) => {{
+                let mut interp = $interp::new();
+                let (_, data_in, _) = unsafe { data_in.align_to::<[f32; $channels]>() };
+                let (_, data_out, _) = unsafe { data_out.align_to_mut::<[f32; $channels]>() };
+                for (input_frame, output_frames) in
+                    Iterator::zip(data_in.into_iter(), data_out.chunks_exact_mut(factor))
+                {
+                    output_frames.copy_from_slice(&interp.interpolate(*input_frame));
+                }
+            }};
+        }
+
+        macro_rules! process_generic {
+            ( $interp:ident, $channels:expr ) => {{
+                let mut interp = vec![$interp::<[f32; 1]>::new(); $channels];
+                let frames = data_in.len() / channels;
+                for frame in 0..frames {
+                    for channel in 0..$channels {
+                        let in_sample = data_in[(frame * $channels) + channel];
+                        for (o, [output_sample]) in
+                            interp[channel].interpolate([in_sample]).iter().enumerate()
+                        {
+                            let output_frame = frame * factor + o;
+                            data_out[(output_frame * $channels) + channel] = *output_sample;
+                        }
+                    }
+                }
+            }};
+        }
+
+        match (factor, channels) {
+            (2, 1) => process_specialized!(Interp2F, 1),
+            (2, 2) => process_specialized!(Interp2F, 2),
+            (2, 4) => process_specialized!(Interp2F, 4),
+            (2, 6) => process_specialized!(Interp2F, 6),
+            (2, 8) => process_specialized!(Interp2F, 8),
+            (4, 1) => process_specialized!(Interp4F, 1),
+            (4, 2) => process_specialized!(Interp4F, 2),
+            (4, 4) => process_specialized!(Interp4F, 4),
+            (4, 6) => process_specialized!(Interp4F, 6),
+            (4, 8) => process_specialized!(Interp4F, 8),
+            (2, c) => process_generic!(Interp2F, c),
+            (4, c) => process_generic!(Interp4F, c),
+            _ => unimplemented!(),
+        }
+    }
 
     #[quickcheck]
     fn compare_c_impl(signal: Signal<f32>) -> quickcheck::TestResult {
@@ -206,26 +247,12 @@ mod tests {
         let mut data_out = vec![0.0f32; signal.data.len() * factor];
         let mut data_out_c = vec![0.0f32; signal.data.len() * factor];
 
-        {
-            // Need to deinterleave the input and interleave the output
-            let mut data_in_tmp = vec![0.0f32; signal.data.len()];
-            let mut data_out_tmp = vec![0.0f32; signal.data.len() * factor];
-
-            for (c, out) in data_in_tmp.chunks_exact_mut(frames).enumerate() {
-                for (s, out) in out.iter_mut().enumerate() {
-                    *out = signal.data[signal.channels as usize * s + c];
-                }
-            }
-
-            let mut interp = Interp::new(49, factor, signal.channels);
-            interp.process(&data_in_tmp, &mut data_out_tmp);
-
-            for (c, i) in data_out_tmp.chunks_exact(frames * factor).enumerate() {
-                for (s, i) in i.iter().enumerate() {
-                    data_out[signal.channels as usize * s + c] = *i;
-                }
-            }
-        }
+        process_rust(
+            &signal.data,
+            &mut data_out,
+            factor,
+            signal.channels as usize,
+        );
 
         unsafe {
             let interp = interp_create_c(49, factor as u32, signal.channels);
@@ -242,7 +269,8 @@ mod tests {
             assert_float_eq!(
                 *r,
                 *c,
-                ulps <= 2,
+                // For a performance-boost, filter is defined as f32, causing slightly lower precision
+                abs <= 0.000004,
                 "Rust and C implementation differ at sample {}",
                 i
             );

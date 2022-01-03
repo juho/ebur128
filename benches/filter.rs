@@ -43,14 +43,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let channel_map = [ebur128::Channel::Left; 2];
         let mut data_out = vec![0.0f64; 19200 * 2];
         let mut data = vec![0i16; 19200 * 2];
-        let mut data_planar = vec![0i16; 48_000 * 5 * 2];
-        let (fst, snd) = data_planar.split_at_mut(48_000 * 5);
+        let mut data_planar = vec![0i16; 19200 * 2];
+        let (fst, snd) = data_planar.split_at_mut(19200);
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
-        for (out, (fst, snd)) in data
-            .chunks_exact_mut(2)
-            .zip(fst.iter_mut().zip(snd.iter_mut()))
-        {
+        for (out, (fst, snd)) in Iterator::zip(
+            data.chunks_exact_mut(2),
+            Iterator::zip(fst.iter_mut(), snd.iter_mut()),
+        ) {
             let val = f32::sin(accumulator) * std::i16::MAX as f32;
             out[0] = val as i16;
             out[1] = val as i16;
@@ -83,7 +83,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Interleaved", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Interleaved::new(&*data, 2).unwrap()),
+                        black_box(ebur128::Interleaved::new(&*data, 2).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -95,7 +95,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Planar", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Planar::new(&[fst, snd]).unwrap()),
+                        black_box(ebur128::Planar::new(&[fst, snd]).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -107,14 +107,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         group.finish();
 
         let mut data = vec![0i32; 19200 * 2];
-        let mut data_planar = vec![0i32; 48_000 * 5 * 2];
-        let (fst, snd) = data_planar.split_at_mut(48_000 * 5);
+        let mut data_planar = vec![0i32; 19200 * 2];
+        let (fst, snd) = data_planar.split_at_mut(19200);
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
-        for (out, (fst, snd)) in data
-            .chunks_exact_mut(2)
-            .zip(fst.iter_mut().zip(snd.iter_mut()))
-        {
+        for (out, (fst, snd)) in Iterator::zip(
+            data.chunks_exact_mut(2),
+            Iterator::zip(fst.iter_mut(), snd.iter_mut()),
+        ) {
             let val = f32::sin(accumulator) * std::i32::MAX as f32;
             out[0] = val as i32;
             out[1] = val as i32;
@@ -147,7 +147,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Interleaved", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Interleaved::new(&*data, 2).unwrap()),
+                        black_box(ebur128::Interleaved::new(&*data, 2).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -159,7 +159,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Planar", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Planar::new(&[fst, snd]).unwrap()),
+                        black_box(ebur128::Planar::new(&[fst, snd]).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -171,14 +171,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         group.finish();
 
         let mut data = vec![0.0f32; 19200 * 2];
-        let mut data_planar = vec![0.0f32; 48_000 * 5 * 2];
-        let (fst, snd) = data_planar.split_at_mut(48_000 * 5);
+        let mut data_planar = vec![0.0f32; 19200 * 2];
+        let (fst, snd) = data_planar.split_at_mut(19200);
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
-        for (out, (fst, snd)) in data
-            .chunks_exact_mut(2)
-            .zip(fst.iter_mut().zip(snd.iter_mut()))
-        {
+        for (out, (fst, snd)) in Iterator::zip(
+            data.chunks_exact_mut(2),
+            Iterator::zip(fst.iter_mut(), snd.iter_mut()),
+        ) {
             let val = f32::sin(accumulator);
             out[0] = val;
             out[1] = val;
@@ -211,7 +211,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Interleaved", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Interleaved::new(&*data, 2).unwrap()),
+                        black_box(ebur128::Interleaved::new(&*data, 2).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -223,7 +223,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Planar", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Planar::new(&[fst, snd]).unwrap()),
+                        black_box(ebur128::Planar::new(&[fst, snd]).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -235,14 +235,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         group.finish();
 
         let mut data = vec![0.0f64; 19200 * 2];
-        let mut data_planar = vec![0.0f64; 48_000 * 5 * 2];
-        let (fst, snd) = data_planar.split_at_mut(48_000 * 5);
+        let mut data_planar = vec![0.0f64; 19200 * 2];
+        let (fst, snd) = data_planar.split_at_mut(19200);
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
-        for (out, (fst, snd)) in data
-            .chunks_exact_mut(2)
-            .zip(fst.iter_mut().zip(snd.iter_mut()))
-        {
+        for (out, (fst, snd)) in Iterator::zip(
+            data.chunks_exact_mut(2),
+            Iterator::zip(fst.iter_mut(), snd.iter_mut()),
+        ) {
             let val = f32::sin(accumulator);
             out[0] = val as f64;
             out[1] = val as f64;
@@ -275,7 +275,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Interleaved", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Interleaved::new(&*data, 2).unwrap()),
+                        black_box(ebur128::Interleaved::new(&*data, 2).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),
@@ -287,7 +287,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             group.bench_function("Rust/Planar", |b| {
                 b.iter(|| {
                     f.process(
-                        black_box(&ebur128::Planar::new(&[fst, snd]).unwrap()),
+                        black_box(ebur128::Planar::new(&[fst, snd]).unwrap()),
                         black_box(&mut data_out),
                         black_box(0),
                         black_box(&channel_map),

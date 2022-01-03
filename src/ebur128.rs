@@ -20,6 +20,7 @@
 // THE SOFTWARE.
 
 use crate::energy_to_loudness;
+use crate::utils::Sample;
 
 use bitflags::bitflags;
 
@@ -77,73 +78,73 @@ bitflags! {
 ///
 /// Use these values when setting the channel map with
 /// [`EbuR128::set_channel`](struct.EbuR128.html#method.set_channel).
-/// See definitions in ITU R-REC-BS 1770-4.
+/// See definitions in ITU R-REC-BS 1770-4 and ITU R-REC-BS 2051-2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Channel {
     /// unused channel (for example LFE channel)
     Unused,
-    /// Left or itu M+030
+    /// Left or ITU M+030
     Left,
-    /// Right or itu M-030
+    /// Right or ITU M-030
     Right,
-    /// Center or itu M+000
+    /// Center or ITU M+000
     Center,
-    /// Left surround or itu M+110
+    /// Left surround or ITU M+110
     LeftSurround,
-    /// Right surround or itu M-110
+    /// Right surround or ITU M-110
     RightSurround,
     /// a channel that is counted twice
     DualMono,
-    /// itu M+SC
+    /// ITU M+SC
     MpSC,
-    /// itu M-SC
+    /// ITU M-SC
     MmSC,
-    /// itu M+060
+    /// ITU M+060
     Mp060,
-    /// itu M-060
+    /// ITU M-060
     Mm060,
-    /// itu M+090
+    /// ITU M+090
     Mp090,
-    /// itu M-090
+    /// ITU M-090
     Mm090,
-    /// itu M+135
+    /// ITU M+135
     Mp135,
-    /// itu M-135
+    /// ITU M-135
     Mm135,
-    /// itu M+180
+    /// ITU M+180
     Mp180,
-    /// itu U+000
+    /// ITU U+000
     Up000,
-    /// itu U+030
+    /// ITU U+030
     Up030,
-    /// itu U-030
+    /// ITU U-030
     Um030,
-    /// itu U+045
+    /// ITU U+045
     Up045,
-    /// itu U-030
+    /// ITU U-030
     Um045,
-    /// itu U+090
+    /// ITU U+090
     Up090,
-    /// itu U-090
+    /// ITU U-090
     Um090,
-    /// itu U+110
+    /// ITU U+110
     Up110,
-    /// itu U-110
+    /// ITU U-110
     Um110,
-    /// itu U+135
+    /// ITU U+135
     Up135,
-    /// itu U-135
+    /// ITU U-135
     Um135,
-    /// itu U+180
+    /// ITU U+180
     Up180,
-    /// itu T+000
+    /// ITU T+000
     Tp000,
-    /// itu B+000
+    /// ITU B+000
     Bp000,
-    /// itu B+045
+    /// ITU B+045
     Bp045,
-    /// itu B-045
+    /// ITU B-045
     Bm045,
 }
 
@@ -289,7 +290,7 @@ impl EbuR128 {
             return Err(Error::NoMem);
         }
 
-        if rate < 16 || rate > MAX_RATE {
+        if !(16..=MAX_RATE).contains(&rate) {
             return Err(Error::NoMem);
         }
 
@@ -439,7 +440,7 @@ impl EbuR128 {
             return Err(Error::NoMem);
         }
 
-        if rate < 16 || rate > MAX_RATE {
+        if !(16..=MAX_RATE).contains(&rate) {
             return Err(Error::NoMem);
         }
 
@@ -544,10 +545,7 @@ impl EbuR128 {
 
     /// Resets the current state.
     pub fn reset(&mut self) {
-        // TODO: Use slice::fill() once stabilized
-        for v in &mut *self.audio_data {
-            *v = 0.0;
-        }
+        self.audio_data.fill(0.0);
 
         // the first block needs 400ms of audio data
         self.needed_frames = self.samples_in_100ms * 4;
@@ -556,14 +554,8 @@ impl EbuR128 {
         // reset short term frame counter
         self.short_term_frame_counter = 0;
 
-        // TODO: Use slice::fill() once stabilized
-        for v in &mut *self.true_peak {
-            *v = 0.0;
-        }
-        // TODO: Use slice::fill() once stabilized
-        for v in &mut *self.sample_peak {
-            *v = 0.0;
-        }
+        self.true_peak.fill(0.0);
+        self.sample_peak.fill(0.0);
 
         self.filter.reset();
         self.block_energy_history.reset();
@@ -572,7 +564,7 @@ impl EbuR128 {
 
     /// Process frames. This is the generic variant of the different public add_frames() functions
     /// that are defined below.
-    fn add_frames<'a, T: crate::AsF64 + 'a, S: crate::Samples<'a, T>>(
+    fn add_frames<'a, T: Sample + 'a, S: crate::Samples<'a, T>>(
         &mut self,
         mut src: S,
     ) -> Result<(), Error> {
@@ -593,7 +585,7 @@ impl EbuR128 {
                 let (current, next) = src.split_at(self.needed_frames);
 
                 self.filter.process(
-                    &current,
+                    current,
                     &mut *self.audio_data,
                     self.audio_data_index,
                     &self.channel_map,
@@ -631,7 +623,7 @@ impl EbuR128 {
                 let (current, next) = src.split_at(num_frames);
 
                 self.filter.process(
-                    &current,
+                    current,
                     &mut *self.audio_data,
                     self.audio_data_index,
                     &self.channel_map,
@@ -649,7 +641,7 @@ impl EbuR128 {
 
         let prev_sample_peak = self.filter.sample_peak();
         for (sample_peak, prev_sample_peak) in
-            self.sample_peak.iter_mut().zip(prev_sample_peak.iter())
+            Iterator::zip(self.sample_peak.iter_mut(), prev_sample_peak.iter())
         {
             if *prev_sample_peak > *sample_peak {
                 *sample_peak = *prev_sample_peak;
@@ -657,13 +649,19 @@ impl EbuR128 {
         }
 
         let prev_true_peak = self.filter.true_peak();
-        for (true_peak, prev_true_peak) in self.true_peak.iter_mut().zip(prev_true_peak.iter()) {
+        for (true_peak, prev_true_peak) in
+            Iterator::zip(self.true_peak.iter_mut(), prev_true_peak.iter())
+        {
             if *prev_true_peak > *true_peak {
                 *true_peak = *prev_true_peak;
             }
         }
 
         Ok(())
+    }
+
+    fn seed_frames<'a, T: Sample + 'a, S: crate::Samples<'a, T>>(&mut self, src: S) {
+        self.filter.seed(src, &self.channel_map);
     }
 
     /// Add interleaved frames to be processed.
@@ -706,6 +704,62 @@ impl EbuR128 {
         self.add_frames(crate::Planar::new(frames)?)
     }
 
+    /// Add interleaved frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_i16(&mut self, frames: &[i16]) -> Result<(), Error> {
+        self.seed_frames(crate::Interleaved::new(frames, self.channels as usize)?);
+        Ok(())
+    }
+
+    /// Add interleaved frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_i32(&mut self, frames: &[i32]) -> Result<(), Error> {
+        self.seed_frames(crate::Interleaved::new(frames, self.channels as usize)?);
+        Ok(())
+    }
+
+    /// Add interleaved frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_f32(&mut self, frames: &[f32]) -> Result<(), Error> {
+        self.seed_frames(crate::Interleaved::new(frames, self.channels as usize)?);
+        Ok(())
+    }
+
+    /// Add interleaved frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_f64(&mut self, frames: &[f64]) -> Result<(), Error> {
+        self.seed_frames(crate::Interleaved::new(frames, self.channels as usize)?);
+        Ok(())
+    }
+
+    /// Add planar frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_planar_i16(&mut self, frames: &[&[i16]]) -> Result<(), Error> {
+        self.seed_frames(crate::Planar::new(frames)?);
+        Ok(())
+    }
+
+    /// Add planar frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_planar_i32(&mut self, frames: &[&[i32]]) -> Result<(), Error> {
+        self.seed_frames(crate::Planar::new(frames)?);
+        Ok(())
+    }
+
+    /// Add planar frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_planar_f32(&mut self, frames: &[&[f32]]) -> Result<(), Error> {
+        self.seed_frames(crate::Planar::new(frames)?);
+        Ok(())
+    }
+
+    /// Add planar frames to warmup filters, but not be considered for measurements.
+    /// See [`EbuR128::loudness_global_multiple`] for example usage.
+    pub fn seed_frames_planar_f64(&mut self, frames: &[&[f64]]) -> Result<(), Error> {
+        self.seed_frames(crate::Planar::new(frames)?);
+        Ok(())
+    }
+
     /// Get global integrated loudness in LUFS.
     pub fn loudness_global(&self) -> Result<f64, Error> {
         if !self.mode.contains(Mode::I) {
@@ -716,6 +770,13 @@ impl EbuR128 {
     }
 
     /// Get global integrated loudness in LUFS across multiple instances.
+    ///
+    /// This can be used to allow parallel iteration of long signals, assuming some care is taken:
+    ///  1. Divide input-signal up in "chunks" of even 100ms samples. Make chunks overlap by 400ms, for example (0-10s, 9.6-20s, 19.6-30s, ...)
+    ///  2. The first chunk is processed as normal. Then in parallel, for each remaining chunk, create a new instance of `EbuR128`, and in parallel:
+    ///     1. Feed the first 100ms of the chunk (these are samples overlapping with last chunk) through `seed_frames_*` function. This is sufficient to make filter-states in each instance what they would have been if a single analyzer would have reached this point.
+    ///     2. Process the remaining samples of each chunk through the analyzer
+    ///  3. Call [`EbuR128::loudness_global_multiple`] over all the chunks to get the global loudness
     // FIXME: Should maybe be IntoIterator? Maybe AsRef<Self>?
     pub fn loudness_global_multiple<'a>(
         iter: impl Iterator<Item = &'a Self>,
@@ -823,7 +884,7 @@ impl EbuR128 {
             })
             .collect::<Result<SmallVec<[_; 16]>, _>>()?;
 
-        crate::history::History::loudness_range_multiple(&*h).map_err(|_| Error::InvalidMode)
+        crate::history::History::loudness_range_multiple(&*h)
     }
 
     /// Get maximum sample peak from all frames that have been processed.
@@ -931,6 +992,16 @@ mod tests {
     use float_eq::assert_float_eq;
     #[cfg(feature = "c-tests")]
     use quickcheck_macros::quickcheck;
+
+    fn f64_max(mut values: impl Iterator<Item = f64>) -> Option<f64> {
+        let mut v = values.next()?;
+        for candidate in values {
+            if candidate > v {
+                v = candidate
+            }
+        }
+        Some(v)
+    }
 
     #[test]
     fn sine_stereo_i16() {
@@ -1582,7 +1653,7 @@ mod tests {
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
         let (fst, snd) = data.split_at_mut(48_000 * 5);
-        for (fst, snd) in fst.iter_mut().zip(snd.iter_mut()) {
+        for (fst, snd) in Iterator::zip(fst.iter_mut(), snd.iter_mut()) {
             let val = f32::sin(accumulator) * (std::i16::MAX - 1) as f32;
             *fst = val as i16;
             *snd = val as i16;
@@ -1673,7 +1744,7 @@ mod tests {
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
         let (fst, snd) = data.split_at_mut(48_000 * 5);
-        for (fst, snd) in fst.iter_mut().zip(snd.iter_mut()) {
+        for (fst, snd) in Iterator::zip(fst.iter_mut(), snd.iter_mut()) {
             let val = f32::sin(accumulator) * (std::i32::MAX - 1) as f32;
             *fst = val as i32;
             *snd = val as i32;
@@ -1748,7 +1819,7 @@ mod tests {
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
         let (fst, snd) = data.split_at_mut(48_000 * 5);
-        for (fst, snd) in fst.iter_mut().zip(snd.iter_mut()) {
+        for (fst, snd) in Iterator::zip(fst.iter_mut(), snd.iter_mut()) {
             let val = f32::sin(accumulator);
             *fst = val;
             *snd = val;
@@ -1823,7 +1894,7 @@ mod tests {
         let mut accumulator = 0.0;
         let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
         let (fst, snd) = data.split_at_mut(48_000 * 5);
-        for (fst, snd) in fst.iter_mut().zip(snd.iter_mut()) {
+        for (fst, snd) in Iterator::zip(fst.iter_mut(), snd.iter_mut()) {
             let val = f32::sin(accumulator);
             *fst = val as f64;
             *snd = val as f64;
@@ -1974,6 +2045,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chunks_queue_with_true_peak() {
+        let mut data = vec![0.0f32; 48_000 * 3];
+        let mut accumulator = 0.0;
+        let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
+        for out in data.chunks_exact_mut(1) {
+            let val = f32::sin(accumulator);
+            out[0] = val;
+            accumulator += step;
+        }
+
+        let mut ebu1 = EbuR128::new(1, 48_000, Mode::all() & !Mode::HISTOGRAM).unwrap();
+        ebu1.add_frames_f32(&data).unwrap();
+
+        let mut ebu_chunks = Vec::new();
+        for i in 0..3usize {
+            let mut ebu_chunk = EbuR128::new(1, 48_000, Mode::all() & !Mode::HISTOGRAM).unwrap();
+            let start_index = std::cmp::max(i as isize * 48_000, 0) as usize;
+            let stop_index = std::cmp::min(start_index + 48_000 + (48_00 * 3), data.len());
+            if start_index > 0 {
+                ebu_chunk
+                    .seed_frames_f32(&data[start_index - 48_00..start_index])
+                    .unwrap();
+            }
+            ebu_chunk
+                .add_frames_f32(&data[start_index..stop_index])
+                .unwrap();
+            ebu_chunks.push(ebu_chunk);
+        }
+
+        assert_float_eq!(
+            ebu1.sample_peak(0).unwrap(),
+            f64_max(ebu_chunks.iter().map(|meter| meter.sample_peak(0).unwrap())).unwrap(),
+            abs <= 0.000001
+        );
+
+        assert_float_eq!(
+            ebu1.true_peak(0).unwrap(),
+            f64_max(ebu_chunks.iter().map(|meter| meter.true_peak(0).unwrap())).unwrap(),
+            abs <= 0.000001
+        );
+
+        assert_float_eq!(
+            ebu1.loudness_global().unwrap(),
+            EbuR128::loudness_global_multiple(ebu_chunks.iter()).unwrap(),
+            abs <= 0.000001
+        );
+    }
+
+    #[test]
+    fn chunks_histogram_with_true_peak() {
+        let mut data = vec![0.0f32; 48_000 * 3];
+        let mut accumulator = 0.0;
+        let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
+        for out in data.chunks_exact_mut(1) {
+            let val = f32::sin(accumulator);
+            out[0] = val;
+            accumulator += step;
+        }
+
+        let mut ebu1 = EbuR128::new(1, 48_000, Mode::all() | Mode::HISTOGRAM).unwrap();
+        ebu1.add_frames_f32(&data).unwrap();
+
+        let mut ebu_chunks = Vec::new();
+        for i in 0..3usize {
+            let mut ebu_chunk =
+                EbuR128::new(1, 48_000, Mode::all() | Mode::HISTOGRAM & !Mode::HISTOGRAM).unwrap();
+            let start_index = std::cmp::max(i as isize * 48_000, 0) as usize;
+            let stop_index = std::cmp::min(start_index + 48_000 + (48_00 * 3), data.len());
+            if start_index > 0 {
+                ebu_chunk
+                    .seed_frames_f32(&data[start_index - 48_00..start_index])
+                    .unwrap();
+            }
+            ebu_chunk
+                .add_frames_f32(&data[start_index..stop_index])
+                .unwrap();
+            ebu_chunks.push(ebu_chunk);
+        }
+
+        assert_float_eq!(
+            ebu1.sample_peak(0).unwrap(),
+            f64_max(ebu_chunks.iter().map(|meter| meter.sample_peak(0).unwrap())).unwrap(),
+            abs <= 0.000001
+        );
+
+        assert_float_eq!(
+            ebu1.true_peak(0).unwrap(),
+            f64_max(ebu_chunks.iter().map(|meter| meter.true_peak(0).unwrap())).unwrap(),
+            abs <= 0.000001
+        );
+
+        assert_float_eq!(
+            ebu1.loudness_global().unwrap(),
+            EbuR128::loudness_global_multiple(ebu_chunks.iter()).unwrap(),
+            abs <= 0.000001
+        );
+    }
+
     #[cfg(feature = "c-tests")]
     fn compare_results(ebu: &EbuR128, ebu_c: &ebur128_c::EbuR128, channels: u32) {
         assert_float_eq!(
@@ -2017,12 +2187,14 @@ mod tests {
             assert_float_eq!(
                 ebu.true_peak(c).unwrap(),
                 ebu_c.true_peak(c).unwrap(),
-                ulps <= 2
+                // For a performance-boost, filter is defined as f32, causing slightly lower precision
+                abs <= 0.000004,
             );
             assert_float_eq!(
                 ebu.prev_true_peak(c).unwrap(),
                 ebu_c.prev_true_peak(c).unwrap(),
-                ulps <= 2
+                // For a performance-boost, filter is defined as f32, causing slightly lower precision
+                abs <= 0.000004,
             );
         }
 
